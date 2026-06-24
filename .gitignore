@@ -28,3 +28,6 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# User dictation history (private)
+history.jsonl

@@ -3,19 +3,24 @@ LocalFlow - a fully local, offline voice dictation tool.
 
 Hold a hotkey, speak, release. Audio is transcribed with faster-whisper (on your
 GPU if available), optionally polished by a local Ollama model, and pasted at
-your cursor. No audio or text ever leaves this machine.
+your cursor. Runs in the system tray. No audio or text ever leaves this machine.
 """
 
 import os
+import re
 import sys
+import json
 import time
 import threading
 from pathlib import Path
+from datetime import datetime
 
 try:
     import tomllib  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
+
+__version__ = "0.2.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -23,7 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 def app_dir() -> Path:
     """Directory the app 'lives' in - next to the .exe when frozen, else next
-    to this script. Config and logs live here so users can edit them."""
+    to this script. Config / history live here so users can find them."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).parent
@@ -47,7 +52,6 @@ def _register_cuda_dlls():
     for root in roots:
         if not root.is_dir():
             continue
-        # Any directory containing a cublas/cudnn DLL is a candidate.
         for pattern in ("cublas64_*.dll", "cudnn*64_*.dll"):
             for dll in root.rglob(pattern):
                 bindirs.add(str(dll.parent))
@@ -73,6 +77,7 @@ import requests
 
 
 CONFIG_PATH = app_dir() / "config.toml"
+HISTORY_PATH = app_dir() / "history.jsonl"
 
 DEFAULT_CONFIG = """# LocalFlow configuration
 # Edit and restart the app. Anything left out falls back to a sensible default.
@@ -92,6 +97,20 @@ ollama_url = "http://localhost:11434"
 model = "qwen2.5:14b"
 think = false
 keep_alive = "30m"
+
+[dictionary]
+# Bias transcription toward names / jargon you use often.
+terms = []                  # e.g. ["Kubernetes", "Neelkukreti", "LocalFlow"]
+
+[commands]
+enabled = true              # say "new line" / "new paragraph" to insert breaks
+
+[history]
+enabled = true              # log every dictation to history.jsonl
+
+[feedback]
+sounds = true               # subtle audio cues on start / stop / done
+tray = true                 # system tray icon (falls back to console if unavailable)
 
 [output]
 method = "paste"            # paste | type
@@ -117,6 +136,81 @@ def cfg_get(cfg: dict, section: str, key: str, default):
 
 
 # --------------------------------------------------------------------------- #
+# Spoken formatting commands
+# --------------------------------------------------------------------------- #
+# Applied to the final text so structural commands work in raw or cleaned mode.
+_COMMANDS = [
+    (re.compile(r"\s*\bnew paragraph\b\s*", re.I), "\n\n"),
+    (re.compile(r"\s*\b(new|next) line\b\s*", re.I), "\n"),
+]
+
+
+def apply_spoken_commands(text: str) -> str:
+    for pattern, repl in _COMMANDS:
+        text = pattern.sub(repl, text)
+    # Capitalize the first letter after an inserted break.
+    text = re.sub(r"(\n+)(\s*[a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
+    return text.strip()
+
+
+def build_initial_prompt(terms) -> str:
+    """Whisper biases toward words seen in initial_prompt - great for names."""
+    terms = [t.strip() for t in (terms or []) if t.strip()]
+    if not terms:
+        return None
+    return "Glossary: " + ", ".join(terms) + "."
+
+
+# --------------------------------------------------------------------------- #
+# Audio cues
+# --------------------------------------------------------------------------- #
+class Sounds:
+    SR = 44100
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.start = self._tone([660, 880], 0.09)
+        self.stop = self._tone([880, 520], 0.09)
+        self.done = self._tone([1040], 0.07, vol=0.15)
+
+    def _tone(self, freqs, dur, vol=0.2):
+        t = np.linspace(0, dur, int(self.SR * dur), False)
+        wave = sum(np.sin(2 * np.pi * f * t) for f in freqs) / len(freqs)
+        fade = max(1, int(self.SR * 0.008))
+        env = np.ones_like(wave)
+        env[:fade] = np.linspace(0, 1, fade)
+        env[-fade:] = np.linspace(1, 0, fade)
+        return (wave * env * vol).astype(np.float32)
+
+    def play(self, name: str):
+        if not self.enabled:
+            return
+        try:
+            sd.play(getattr(self, name), self.SR)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# History
+# --------------------------------------------------------------------------- #
+class History:
+    def __init__(self, enabled: bool, path: Path = HISTORY_PATH):
+        self.enabled = enabled
+        self.path = path
+
+    def log(self, entry: dict):
+        if not self.enabled:
+            return
+        try:
+            entry = {"ts": datetime.now().isoformat(timespec="seconds"), **entry}
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # Transcriber (faster-whisper)
 # --------------------------------------------------------------------------- #
 def _cuda_available() -> bool:
@@ -135,18 +229,16 @@ class Transcriber:
         w = cfg.get("whisper", {})
         language = w.get("language", "en")
         self.language = None if language == "auto" else language
+        self.initial_prompt = build_initial_prompt(cfg_get(cfg, "dictionary", "terms", []))
 
-        # Resolve device.
         device = w.get("device", "auto")
         if device == "auto":
             device = "cuda" if _cuda_available() else "cpu"
 
-        # Resolve compute type.
         compute_type = w.get("compute_type", "auto")
         if compute_type == "auto":
             compute_type = "int8_float16" if device == "cuda" else "int8"
 
-        # Resolve model.
         model = w.get("model", "auto")
         if model == "auto":
             model = "large-v3" if device == "cuda" else "base"
@@ -163,7 +255,6 @@ class Transcriber:
             )
             self.device = "cpu"
 
-        # Warm up so the first real dictation isn't slow.
         self.model.transcribe(np.zeros(16000, dtype=np.float32), language=self.language)
         print(f"[whisper] ready on {self.device}.")
 
@@ -174,6 +265,7 @@ class Transcriber:
             beam_size=5,
             vad_filter=True,
             condition_on_previous_text=False,
+            initial_prompt=self.initial_prompt,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
 
@@ -201,10 +293,7 @@ class Cleaner:
         self.keep_alive = c.get("keep_alive", "30m")
 
         setting = c.get("enabled", "auto")
-        if setting == "auto":
-            self.enabled = self._detect()
-        else:
-            self.enabled = bool(setting)
+        self.enabled = self._detect() if setting == "auto" else bool(setting)
 
         if self.enabled:
             print(f"[cleanup] warming up Ollama model '{self.model}' ...")
@@ -219,12 +308,10 @@ class Cleaner:
                   "Install Ollama + `ollama pull " + self.model + "` to enable.")
 
     def _detect(self) -> bool:
-        """Enable only if Ollama is reachable and the configured model is pulled."""
         try:
             r = requests.get(self.base + "/api/tags", timeout=2)
             r.raise_for_status()
             names = [m.get("name", "") for m in r.json().get("models", [])]
-            # match with or without the ":latest" tag
             base = self.model.split(":")[0]
             return any(n == self.model or n.split(":")[0] == base for n in names)
         except Exception:
@@ -327,6 +414,71 @@ class Recorder:
 
 
 # --------------------------------------------------------------------------- #
+# System tray icon (optional)
+# --------------------------------------------------------------------------- #
+STATE_COLORS = {
+    "idle": (90, 96, 110),
+    "listening": (46, 204, 113),
+    "processing": (241, 196, 15),
+    "paused": (120, 60, 60),
+}
+
+
+def _make_icon_image(state: str):
+    from PIL import Image, ImageDraw
+
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    color = STATE_COLORS.get(state, STATE_COLORS["idle"])
+    d.ellipse([4, 4, size - 4, size - 4], fill=color)
+    # simple mic glyph
+    d.rounded_rectangle([26, 16, 38, 38], radius=6, fill=(255, 255, 255))
+    d.arc([22, 26, 42, 46], start=0, end=180, fill=(255, 255, 255), width=3)
+    d.line([32, 46, 32, 52], fill=(255, 255, 255), width=3)
+    return img
+
+
+class Tray:
+    """Wraps pystray. Returns None from create() if a tray can't be set up."""
+
+    def __init__(self, app):
+        self.app = app
+        self.icon = None
+
+    def create(self):
+        try:
+            import pystray
+
+            menu = pystray.Menu(
+                pystray.MenuItem(
+                    lambda item: "Resume" if self.app.paused else "Pause",
+                    self.app.toggle_pause,
+                ),
+                pystray.MenuItem("Edit config", lambda *_: self.app.open_path(CONFIG_PATH)),
+                pystray.MenuItem("Open history", lambda *_: self.app.open_path(HISTORY_PATH)),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self.app.quit),
+            )
+            self.icon = pystray.Icon(
+                "LocalFlow", _make_icon_image("idle"), "LocalFlow - idle", menu
+            )
+            return self.icon
+        except Exception as e:
+            print(f"[tray] unavailable ({e!r}); running in console mode.")
+            return None
+
+    def set_state(self, state: str):
+        if not self.icon:
+            return
+        try:
+            self.icon.icon = _make_icon_image(state)
+            self.icon.title = f"LocalFlow - {state}"
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # App
 # --------------------------------------------------------------------------- #
 class LocalFlow:
@@ -335,31 +487,66 @@ class LocalFlow:
         self.min_duration = cfg_get(cfg, "audio", "min_duration", 0.3)
         self.sample_rate = cfg_get(cfg, "audio", "sample_rate", 16000)
         self.hotkey = cfg_get(cfg, "hotkey", "key", "right ctrl")
+        self.commands_on = cfg_get(cfg, "commands", "enabled", True)
 
         self.transcriber = Transcriber(cfg)
         self.cleaner = Cleaner(cfg)
         self.injector = Injector(cfg)
         self.recorder = Recorder(self.sample_rate)
+        self.sounds = Sounds(cfg_get(cfg, "feedback", "sounds", True))
+        self.history = History(cfg_get(cfg, "history", "enabled", True))
+        self.tray = Tray(self)
 
+        self.paused = False
         self._processing = False
         self._lock = threading.Lock()
 
+    # -- tray menu actions -------------------------------------------------- #
+    def toggle_pause(self, *_):
+        self.paused = not self.paused
+        self.tray.set_state("paused" if self.paused else "idle")
+        print(f"[state] {'paused' if self.paused else 'active'}")
+
+    def open_path(self, path):
+        try:
+            if Path(path).exists():
+                os.startfile(str(path))  # noqa: S606 (Windows only)
+        except Exception:
+            pass
+
+    def quit(self, *_):
+        print("\n[exit] shutting down.")
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
+        if self.tray.icon:
+            self.tray.icon.stop()
+        os._exit(0)
+
+    # -- dictation ---------------------------------------------------------- #
     def _on_key(self, event):
+        if self.paused:
+            return
         if event.event_type == keyboard.KEY_DOWN:
             with self._lock:
                 if self.recorder.recording or self._processing:
                     return
                 self.recorder.start()
+            self.tray.set_state("listening")
+            self.sounds.play("start")
             print("\n[rec] listening...")
         elif event.event_type == keyboard.KEY_UP:
             if not self.recorder.recording:
                 return
             audio = self.recorder.stop()
+            self.sounds.play("stop")
             threading.Thread(target=self._process, args=(audio,), daemon=True).start()
 
     def _process(self, audio: np.ndarray):
         with self._lock:
             self._processing = True
+        self.tray.set_state("processing")
         try:
             dur = len(audio) / self.sample_rate
             if dur < self.min_duration:
@@ -373,28 +560,48 @@ class LocalFlow:
                 return
             print(f"[raw]  {raw}")
             final = self.cleaner.clean(raw)
+            if self.commands_on:
+                final = apply_spoken_commands(final)
             t2 = time.time()
             print(f"[out]  {final}")
             print(f"[time] transcribe {t1-t0:.2f}s | cleanup {t2-t1:.2f}s | audio {dur:.2f}s")
+            self.history.log({
+                "raw": raw, "final": final,
+                "transcribe_s": round(t1 - t0, 2), "cleanup_s": round(t2 - t1, 2),
+                "audio_s": round(dur, 2), "device": self.transcriber.device,
+            })
             self.injector.inject(final)
+            self.sounds.play("done")
         finally:
             with self._lock:
                 self._processing = False
+            self.tray.set_state("paused" if self.paused else "idle")
 
+    # -- run ---------------------------------------------------------------- #
     def run(self):
         keyboard.hook_key(self.hotkey, self._on_key)
-        print("\n" + "=" * 56)
-        print(f"  LocalFlow ready.  HOLD [{self.hotkey}] to dictate.")
-        print("  Press Ctrl+C in this window to quit.")
-        print("=" * 56 + "\n")
-        try:
-            keyboard.wait()
-        except KeyboardInterrupt:
-            print("\n[exit] shutting down.")
+        banner = (
+            "\n" + "=" * 56 + "\n"
+            f"  LocalFlow v{__version__} ready.  HOLD [{self.hotkey}] to dictate.\n"
+            + ("  Right-click the tray icon for options.\n"
+               if cfg_get(self.cfg, "feedback", "tray", True) else "")
+            + "  Press Ctrl+C here to quit.\n"
+            + "=" * 56 + "\n"
+        )
+        print(banner)
+
+        icon = self.tray.create() if cfg_get(self.cfg, "feedback", "tray", True) else None
+        if icon is not None:
+            icon.run()  # blocks on main thread until quit
+        else:
+            try:
+                keyboard.wait()
+            except KeyboardInterrupt:
+                self.quit()
 
 
 def main():
-    print("LocalFlow - local offline voice dictation\n")
+    print(f"LocalFlow v{__version__} - local offline voice dictation\n")
     cfg = load_config()
     try:
         app = LocalFlow(cfg)

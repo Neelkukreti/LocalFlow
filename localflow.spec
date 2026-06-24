@@ -14,11 +14,15 @@ from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 datas, binaries, hiddenimports = [], [], []
 
 # Heavy packages that need their data files / dynamic libs collected.
-for pkg in ["faster_whisper", "ctranslate2", "av", "onnxruntime", "sounddevice", "tokenizers"]:
+for pkg in ["faster_whisper", "ctranslate2", "av", "onnxruntime", "sounddevice",
+            "tokenizers", "pystray", "PIL"]:
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
     hiddenimports += h
+
+# pystray picks its backend dynamically; ensure the Windows one is included.
+hiddenimports += ["pystray._win32", "PIL._tkinter_finder"]
 
 # NVIDIA CUDA runtime libs - only present in a GPU build environment.
 for pkg in ["nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc"]:
@@ -35,7 +39,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "PIL"],
+    excludes=["matplotlib"],
     cipher=block_cipher,
     noarchive=False,
 )

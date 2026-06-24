@@ -16,6 +16,31 @@ no cloud.
 HOLD Right-Ctrl ─▶ record mic ─▶ faster-whisper ─▶ (optional) LLM cleanup ─▶ paste at cursor
 ```
 
+## Features
+
+- 🎙️ **Hold-to-talk dictation** anywhere — works in any app, pastes at your cursor
+- 🧠 **AI cleanup** (optional) — a local LLM fixes punctuation/casing and removes "um"s
+- ⚡ **GPU-accelerated** — `faster-whisper` on CUDA (auto-falls back to CPU)
+- 🔒 **100% offline** — no account, no cloud, nothing leaves your machine
+- 🖥️ **System tray app** — runs in the background; icon turns green while listening, amber while thinking
+- 🔊 **Audio cues** — subtle start/stop/done tones
+- 📖 **Personal dictionary** — bias transcription toward your names & jargon
+- ⌨️ **Voice commands** — say *"new line"* / *"new paragraph"* for real breaks
+- 📝 **History** — every dictation logged to `history.jsonl`
+
+### vs. Wispr Flow
+
+| | Wispr Flow | LocalFlow |
+|---|:---:|:---:|
+| Runs fully offline | ❌ (cloud) | ✅ |
+| Free / no subscription | ❌ | ✅ |
+| Hold-to-talk anywhere | ✅ | ✅ |
+| AI formatting | ✅ | ✅ (local LLM) |
+| Personal dictionary | ✅ | ✅ |
+| Voice commands | ✅ | ✅ (basic) |
+| Tray app + feedback | ✅ | ✅ |
+| Your data stays private | ⚠️ | ✅ |
+
 ---
 
 ## Download (easiest)
@@ -95,6 +120,11 @@ defaults mean you usually don't need to touch it.
 | `whisper.language` | `en` for speed, or `auto` to detect |
 | `cleanup.enabled` | `auto` (on if Ollama present) / `true` / `false` |
 | `cleanup.model` | Any pulled Ollama model |
+| `dictionary.terms` | List of names/jargon to bias transcription toward |
+| `commands.enabled` | Interpret spoken "new line" / "new paragraph" |
+| `feedback.tray` | System tray icon (else console mode) |
+| `feedback.sounds` | Start/stop/done audio cues |
+| `history.enabled` | Log dictations to `history.jsonl` |
 | `output.method` | `paste` (fast) or `type` (char-by-char) |
 
 ## How it works
