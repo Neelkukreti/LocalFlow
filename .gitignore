@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# PyInstaller build output
+build/
+dist/
+*.manifest
+
+# Local config (users generate their own from config.toml defaults)
+# config.toml is tracked as the documented default; uncomment to ignore local edits:
+# config.toml
+
+# Models / caches
+*.bin
+*.pt
+.cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,5 @@
+# GPU dependencies (NVIDIA CUDA 12). Installs core + CUDA runtime libs.
+#   pip install -r requirements-gpu.txt
+-r requirements.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

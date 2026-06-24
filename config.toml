@@ -1,0 +1,30 @@
+# LocalFlow configuration
+# Edit and restart the app. Anything left out falls back to a sensible default.
+
+[hotkey]
+# Hold this key to talk; release to transcribe & inject.
+# Examples: "right ctrl", "right alt", "f9", "ctrl+space"
+key = "right ctrl"
+
+[whisper]
+model = "auto"          # auto = large-v3 on GPU, base on CPU. Or: tiny|base|small|medium|large-v3|distil-large-v3
+device = "auto"         # auto | cuda | cpu
+compute_type = "auto"   # auto | float16 | int8_float16 | int8
+language = "en"         # "en" for speed, or "auto" to detect
+
+[cleanup]
+# Polish the raw transcript with a local Ollama model. Entirely optional.
+enabled = "auto"        # auto = on if Ollama + the model below are available, else off. Or: true | false
+ollama_url = "http://localhost:11434"
+model = "qwen2.5:14b"   # any pulled Ollama model. Non-reasoning instruct models work best.
+think = false           # keep off (only relevant for reasoning models like qwen3)
+keep_alive = "30m"      # keep the model resident so mid-session pauses don't reload it
+
+[output]
+method = "paste"        # paste (clipboard+Ctrl+V, fast/reliable) | type (char-by-char)
+restore_clipboard = true
+trailing_space = true   # add a space after injected text
+
+[audio]
+sample_rate = 16000
+min_duration = 0.3      # ignore accidental taps shorter than this (seconds)
